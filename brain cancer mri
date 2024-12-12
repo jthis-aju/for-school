@@ -1,0 +1,138 @@
+# Import necessary libraries
+import os
+import numpy as np
+import cv2
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from tensorflow.keras.applications import EfficientNetB7
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Dropout, GlobalAveragePooling2D
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.utils import to_categorical
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from sklearn.metrics import classification_report, roc_auc_score
+
+# Define paths and image size
+base_path = "/content/drive/MyDrive/archive/"
+img_size = (600, 600)  # Input size for EfficientNetB7
+
+# Function to load images and labels
+def load_images_and_labels(base_path, img_size=(600, 600)):
+    images = []
+    labels = []
+    for label_name in os.listdir(base_path):
+        label_path = os.path.join(base_path, label_name)
+        if os.path.isdir(label_path):
+            for img_file in os.listdir(label_path):
+                img_path = os.path.join(label_path, img_file)
+                # Load and resize image
+                img = cv2.imread(img_path)
+                if img is not None:
+                    img = cv2.resize(img, img_size)
+                    images.append(img)
+                    labels.append(label_name)
+    return np.array(images), np.array(labels)
+
+# Load images and labels
+X_combined, y_combined_labels = load_images_and_labels(base_path, img_size)
+
+# Encode labels
+label_encoder = LabelEncoder()
+y_combined_encoded = label_encoder.fit_transform(y_combined_labels)
+y_combined_one_hot = to_categorical(y_combined_encoded)
+
+# Save the encoded labels and images (optional)
+np.save("normalized_combined_images.npy", X_combined)
+np.save("labels_combined.npy", y_combined_encoded)
+
+# Split the dataset into training, validation, and test sets
+X_train, X_temp, y_train, y_temp = train_test_split(X_combined, y_combined_one_hot, test_size=0.3, random_state=42)
+X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5, random_state=42)
+
+# Normalize pixel values
+X_train = X_train / 255.0
+X_val = X_val / 255.0
+X_test = X_test / 255.0
+
+# Define the data augmentation generator for training
+train_datagen = ImageDataGenerator(
+    rotation_range=15,
+    width_shift_range=0.1,
+    height_shift_range=0.1,
+    zoom_range=0.1,
+    horizontal_flip=True
+)
+
+# Apply data augmentation to the training set
+train_generator = train_datagen.flow(X_train, y_train, batch_size=32)
+
+# Load the EfficientNetB7 model with pre-trained weights
+base_model = EfficientNetB7(weights='imagenet', include_top=False, input_shape=X_train.shape[1:])
+
+# Freeze the base model layers initially
+base_model.trainable = False
+
+# Add custom classification layers
+model = Sequential([
+    base_model,
+    GlobalAveragePooling2D(),
+    Dense(256, activation='relu'),
+    Dropout(0.5),
+    Dense(len(label_encoder.classes_), activation='softmax')
+])
+
+# Compile the model
+model.compile(
+    optimizer=Adam(learning_rate=0.001),
+    loss='categorical_crossentropy',
+    metrics=['accuracy']
+)
+
+# Define callbacks for early stopping and learning rate reduction
+callbacks = [
+    EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True),
+    ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=3, min_lr=1e-6)
+]
+
+# Train the model
+history = model.fit(
+    train_generator,
+    validation_data=(X_val, y_val),
+    epochs=20,
+    batch_size=32,
+    callbacks=callbacks
+)
+
+# Unfreeze base model for fine-tuning
+base_model.trainable = True
+model.compile(
+    optimizer=Adam(learning_rate=1e-5),
+    loss='categorical_crossentropy',
+    metrics=['accuracy']
+)
+
+# Fine-tune the model
+history_fine = model.fit(
+    train_generator,
+    validation_data=(X_val, y_val),
+    epochs=10,
+    batch_size=32,
+    callbacks=callbacks
+)
+
+# Evaluate the model on the test set
+y_pred = model.predict(X_test)
+y_pred_labels = np.argmax(y_pred, axis=1)
+y_true_labels = np.argmax(y_test, axis=1)
+
+# Classification report
+report = classification_report(y_true_labels, y_pred_labels, target_names=label_encoder.classes_)
+print(report)
+
+# ROC-AUC score
+roc_auc = roc_auc_score(y_test, y_pred, multi_class='ovr')
+print(f"ROC-AUC Score: {roc_auc:.4f}")
+
+# Save the trained model
+model.save('efficientnetb7_mri_classification.h5')
