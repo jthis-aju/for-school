@@ -1,24 +1,25 @@
-# Import necessary libraries
 import os
 import numpy as np
 import cv2
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
-from tensorflow.keras.applications import EfficientNetB7
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, Dropout, GlobalAveragePooling2D
-from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.utils import to_categorical
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
-from sklearn.metrics import classification_report, roc_auc_score
+from keras.applications.efficientnet import EfficientNetB0
+from keras.models import Sequential
+from keras.layers import Dense, Dropout, GlobalAveragePooling2D
+from keras.optimizers import Adam
+import matplotlib.pyplot as plt
+from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc
+import seaborn as sns
+from sklearn.preprocessing import label_binarize
 
 # Define paths and image size
-base_path = "/content/drive/MyDrive/archive/"
-img_size = (600, 600)  # Input size for EfficientNetB7
+base_path = "/content/drive/MyDrive/archive/"  # Path to the folder containing image subfolders
+img_size = (224, 224)  # Input size for EfficientNetB0
 
 # Function to load images and labels
-def load_images_and_labels(base_path, img_size=(600, 600)):
+def load_images_and_labels(base_path, img_size=(224, 224)):
     images = []
     labels = []
     for label_name in os.listdir(base_path):
@@ -50,11 +51,6 @@ np.save("labels_combined.npy", y_combined_encoded)
 X_train, X_temp, y_train, y_temp = train_test_split(X_combined, y_combined_one_hot, test_size=0.3, random_state=42)
 X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5, random_state=42)
 
-# Normalize pixel values
-X_train = X_train / 255.0
-X_val = X_val / 255.0
-X_test = X_test / 255.0
-
 # Define the data augmentation generator for training
 train_datagen = ImageDataGenerator(
     rotation_range=15,
@@ -67,17 +63,17 @@ train_datagen = ImageDataGenerator(
 # Apply data augmentation to the training set
 train_generator = train_datagen.flow(X_train, y_train, batch_size=32)
 
-# Load the EfficientNetB7 model with pre-trained weights
-base_model = EfficientNetB7(weights='imagenet', include_top=False, input_shape=X_train.shape[1:])
+# Load the EfficientNetB0 model with pre-trained weights
+base_model = EfficientNetB0(weights='imagenet', include_top=False, input_shape=X_train.shape[1:])
 
-# Freeze the base model layers initially
+# Freeze the base model layers
 base_model.trainable = False
 
 # Add custom classification layers
 model = Sequential([
     base_model,
     GlobalAveragePooling2D(),
-    Dense(256, activation='relu'),
+    Dense(128, activation='relu'),
     Dropout(0.5),
     Dense(len(label_encoder.classes_), activation='softmax')
 ])
@@ -89,50 +85,96 @@ model.compile(
     metrics=['accuracy']
 )
 
-# Define callbacks for early stopping and learning rate reduction
-callbacks = [
-    EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True),
-    ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=3, min_lr=1e-6)
-]
-
 # Train the model
 history = model.fit(
     train_generator,
     validation_data=(X_val, y_val),
-    epochs=20,
-    batch_size=32,
-    callbacks=callbacks
-)
-
-# Unfreeze base model for fine-tuning
-base_model.trainable = True
-model.compile(
-    optimizer=Adam(learning_rate=1e-5),
-    loss='categorical_crossentropy',
-    metrics=['accuracy']
-)
-
-# Fine-tune the model
-history_fine = model.fit(
-    train_generator,
-    validation_data=(X_val, y_val),
     epochs=10,
-    batch_size=32,
-    callbacks=callbacks
+    batch_size=32
 )
 
 # Evaluate the model on the test set
-y_pred = model.predict(X_test)
-y_pred_labels = np.argmax(y_pred, axis=1)
-y_true_labels = np.argmax(y_test, axis=1)
-
-# Classification report
-report = classification_report(y_true_labels, y_pred_labels, target_names=label_encoder.classes_)
-print(report)
-
-# ROC-AUC score
-roc_auc = roc_auc_score(y_test, y_pred, multi_class='ovr')
-print(f"ROC-AUC Score: {roc_auc:.4f}")
+test_loss, test_accuracy = model.evaluate(X_test, y_test, verbose=2)
+print(f"Test Accuracy: {test_accuracy * 100:.2f}%")
 
 # Save the trained model
-model.save('efficientnetb7_mri_classification.h5')
+model.save('efficientnet_mri_classification.h5')
+
+# Plot training and validation accuracy and loss
+def plot_training_history(history):
+    # Accuracy plot
+    plt.figure(figsize=(12, 5))
+    plt.subplot(1, 2, 1)
+    plt.plot(history.history['accuracy'], label='Training Accuracy')
+    plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
+    plt.title('Training and Validation Accuracy')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.legend()
+
+    # Loss plot
+    plt.subplot(1, 2, 2)
+    plt.plot(history.history['loss'], label='Training Loss')
+    plt.plot(history.history['val_loss'], label='Validation Loss')
+    plt.title('Training and Validation Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+# Call the function
+plot_training_history(history)
+
+# Generate predictions
+y_pred = model.predict(X_test)
+y_pred_classes = np.argmax(y_pred, axis=1)
+y_true_classes = np.argmax(y_test, axis=1)
+
+# Compute confusion matrix
+conf_matrix = confusion_matrix(y_true_classes, y_pred_classes)
+
+# Plot confusion matrix
+def plot_confusion_matrix(conf_matrix, class_names):
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues', xticklabels=class_names, yticklabels=class_names)
+    plt.title('Confusion Matrix')
+    plt.xlabel('Predicted Labels')
+    plt.ylabel('True Labels')
+    plt.show()
+
+# Call the function
+plot_confusion_matrix(conf_matrix, label_encoder.classes_)
+
+# Plot sample predictions
+def plot_sample_predictions(X_test, y_true_classes, y_pred_classes, label_encoder, num_samples=10):
+    plt.figure(figsize=(15, 10))
+    for i in range(num_samples):
+        idx = np.random.randint(0, len(X_test))
+        plt.subplot(2, 5, i + 1)
+        plt.imshow(cv2.cvtColor(X_test[idx], cv2.COLOR_BGR2RGB))  # Convert BGR to RGB for display
+        plt.title(f"True: {label_encoder.classes_[y_true_classes[idx]]}\nPred: {label_encoder.classes_[y_pred_classes[idx]]}")
+        plt.axis('off')
+    plt.tight_layout()
+    plt.show()
+
+# Call the function
+plot_sample_predictions(X_test, y_true_classes, y_pred_classes, label_encoder)
+
+# Plot ROC curve
+# Binarize the labels for ROC curve
+y_test_binarized = label_binarize(y_true_classes, classes=range(len(label_encoder.classes_)))
+
+plt.figure(figsize=(10, 8))
+for i, class_name in enumerate(label_encoder.classes_):
+    fpr, tpr, _ = roc_curve(y_test_binarized[:, i], y_pred[:, i])
+    roc_auc = auc(fpr, tpr)
+    plt.plot(fpr, tpr, label=f'{class_name} (AUC = {roc_auc:.2f})')
+
+plt.title('ROC Curve for Each Class')
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.legend()
+plt.grid()
+plt.show()
